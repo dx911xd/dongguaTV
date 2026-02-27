@@ -1555,8 +1555,8 @@ app.post('/api/auth/v2board', async (req, res) => {
 
             // V2Board 返回格式: { data: { token, auth_data } } 或 { data: "token_string" }
             if (!loginData || !loginData.data) {
-                lastError = '账号或密码错误';
-                continue;
+                // 密码错误：立即返回，不再尝试其他域名（避免触发 v2board 限流）
+                return res.json({ success: false, message: '邮箱或密码错误' });
             }
 
             // 提取 auth token
@@ -1568,8 +1568,8 @@ app.post('/api/auth/v2board', async (req, res) => {
             } else if (loginData.data.token) {
                 authToken = loginData.data.token;
             } else {
-                lastError = '登录响应格式异常';
-                continue;
+                // 登录已达 v2board 服务器，但响应格式异常，不继续尝试其他域名
+                return res.json({ success: false, message: '邮箱或密码错误' });
             }
 
             // Step 2: 获取订阅信息
@@ -1686,6 +1686,20 @@ app.post('/api/auth/v2board', async (req, res) => {
                 if (status === 500 && msg.includes('suspended')) {
                     return res.json({ success: false, message: '您的账号已被禁用' });
                 }
+                if (status === 429) {
+                    // v2board 自身的限流（通常密码错误后触发）
+                    // 提取剩余时间，翻译为中文
+                    let waitMsg = '请求过于频繁，请稍后再试';
+                    const minuteMatch = msg.match(/(\d+)\s*(minutes?|分钟)/i);
+                    if (minuteMatch) {
+                        waitMsg = `请求过于频繁，请${minuteMatch[1]}分钟后再试`;
+                    } else if (msg.match(/(\d+)\s*(seconds?|秒)/i)) {
+                        const secMatch = msg.match(/(\d+)\s*(seconds?|秒)/i);
+                        waitMsg = `请求过于频繁，请${secMatch[1]}秒后再试`;
+                    }
+                    console.log(`[V2Board] 被面板限流: ${msg}`);
+                    return res.json({ success: false, message: waitMsg });
+                }
                 if (status === 422 || status === 403) {
                     // 翻译常见 v2board 英文错误
                     let translated = msg;
@@ -1696,14 +1710,15 @@ app.post('/api/auth/v2board', async (req, res) => {
                     }
                     return res.json({ success: false, message: translated });
                 }
-                lastError = msg || `服务器错误 (${status})`;
+                // 请求已达 v2board 服务器但返回未知错误，不继续尝试其他域名（避免累加失败计数）
+                return res.json({ success: false, message: msg || `服务器错误 (${status})` });
             } else if (err.code === 'ECONNABORTED') {
                 lastError = '连接超时';
             } else {
                 lastError = err.message || '网络错误';
             }
-            // 继续尝试下一个域名
-            console.log(`[V2Board] 域名 ${domain} 失败: ${lastError}`);
+            // 仅网络错误才继续尝试下一个域名
+            console.log(`[V2Board] 域名 ${domain} 网络不可达: ${lastError}`);
         }
     }
 
